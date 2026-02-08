@@ -547,6 +547,12 @@ func parseReviews(reviewsI []any) []Review {
 				description = getNthElementAndCast[string](el, 3, 0)
 			}
 		}
+		if strings.TrimSpace(description) == "" {
+			// Some reviews only contain labeled photos (no free-text comment).
+			// In those cases, lift dish/photo labels into the review description.
+			labelNode := getNthElementAndCast[[]any](el, 2, 2, 0, 1, 21)
+			description = strings.Join(extractReviewLabels(labelNode), ", ")
+		}
 
 		review := Review{
 			Name:           authorName,
@@ -583,6 +589,86 @@ func parseReviews(reviewsI []any) []Review {
 	}
 
 	return ans
+}
+
+func extractReviewLabels(node []any) []string {
+	if len(node) == 0 {
+		return nil
+	}
+
+	seen := make(map[string]struct{})
+	labels := make([]string, 0, 4)
+
+	var walk func(any)
+	walk = func(v any) {
+		switch val := v.(type) {
+		case []any:
+			for i := range val {
+				walk(val[i])
+			}
+		case string:
+			s := strings.TrimSpace(val)
+			if !isLikelyReviewLabel(s) {
+				return
+			}
+			if _, ok := seen[s]; ok {
+				return
+			}
+			seen[s] = struct{}{}
+			labels = append(labels, s)
+		}
+	}
+
+	walk(node)
+
+	if len(labels) == 0 {
+		return nil
+	}
+	if len(labels) > 5 {
+		return labels[:5]
+	}
+
+	return labels
+}
+
+func isLikelyReviewLabel(s string) bool {
+	if s == "" {
+		return false
+	}
+	if len(s) < 3 || len(s) > 80 {
+		return false
+	}
+
+	lower := strings.ToLower(s)
+	rejectContains := []string{
+		"http://", "https://", "www.", "0x", "ugcs_reference",
+		"venus_ugcs_reference", "photos:", "gmm_", "cb_client=",
+		"lh3.googleusercontent.com", "googleusercontent.com",
+	}
+	for i := range rejectContains {
+		if strings.Contains(lower, rejectContains[i]) {
+			return false
+		}
+	}
+
+	rejectPrefix := []string{
+		"cihm", "ciab", "af1q", "chij", "/g/",
+	}
+	for i := range rejectPrefix {
+		if strings.HasPrefix(lower, rejectPrefix[i]) {
+			return false
+		}
+	}
+
+	hasLetter := false
+	for _, r := range s {
+		if (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') {
+			hasLetter = true
+			break
+		}
+	}
+
+	return hasLetter
 }
 
 type getLinkSourceParams struct {

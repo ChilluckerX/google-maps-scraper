@@ -309,3 +309,46 @@ func Test_EntryFromJSON_WithSecurityPrefix(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "Kipriakon", entry.Title)
 }
+
+func Test_EntryFromJSON_ReviewLabelFallbackWhenNoText(t *testing.T) {
+	darray := make([]any, 176)
+	darray[4] = []any{nil, nil, nil, nil, nil, nil, nil, 4.0, 1.0}
+	darray[11] = "Test Place"
+	darray[13] = []any{"Restaurant"}
+	darray[18] = "Test Place, 123 Test St"
+
+	// Build a review payload with no free-text description but with photo labels.
+	// This mirrors image-only reviews where dish tags exist in nested metadata.
+	review := []any{
+		nil,
+		[]any{nil, nil, nil, nil, []any{nil, nil, nil, nil, nil, []any{"Reviewer Name"}}},
+		[]any{
+			[]any{5.0},
+			nil,
+			[]any{
+				[]any{
+					nil,
+					[]any{
+						nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
+						nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
+						[]any{"Tomyam Pekat", "Ikan Siakap 3 Rasa"},
+					},
+				},
+			},
+		},
+	}
+
+	darray[175] = []any{
+		nil, nil, nil, []any{0.0, 0.0, 0.0, 0.0, 1.0}, nil, nil, nil, nil, nil,
+		[]any{[]any{[]any{review}}},
+	}
+
+	raw, err := json.Marshal([]any{nil, nil, nil, nil, nil, nil, darray})
+	require.NoError(t, err)
+
+	entry, err := gmaps.EntryFromJSON(raw)
+	require.NoError(t, err)
+	require.Len(t, entry.UserReviews, 1)
+	require.Equal(t, "Reviewer Name", entry.UserReviews[0].Name)
+	require.Equal(t, "Tomyam Pekat, Ikan Siakap 3 Rasa", entry.UserReviews[0].Description)
+}
