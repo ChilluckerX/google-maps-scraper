@@ -1,6 +1,7 @@
 package gmaps
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"iter"
@@ -17,9 +18,34 @@ type Image struct {
 	Image string `json:"image"`
 }
 
+type VideoSource struct {
+	URL        string `json:"url"`
+	Quality    int    `json:"quality,omitempty"`
+	Height     int    `json:"height,omitempty"`
+	Width      int    `json:"width,omitempty"`
+	StreamType int    `json:"stream_type,omitempty"`
+}
+
+type MediaItem struct {
+	ID           string        `json:"id"`
+	Type         string        `json:"type"`
+	Title        string        `json:"title"`
+	Caption      string        `json:"caption,omitempty"`
+	URL          string        `json:"url"`
+	Thumbnail    string        `json:"thumbnail"`
+	VideoSources []VideoSource `json:"video_sources,omitempty"`
+}
+
 type LinkSource struct {
 	Link   string `json:"link"`
 	Source string `json:"source"`
+}
+
+type MenuItem struct {
+	Section     string `json:"section"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Price       string `json:"price,omitempty"`
 }
 
 type Owner struct {
@@ -86,9 +112,11 @@ type Entry struct {
 	DataID              string                 `json:"data_id"`
 	PlaceID             string                 `json:"place_id"`
 	Images              []Image                `json:"images"`
+	Media               []MediaItem            `json:"media"`
 	Reservations        []LinkSource           `json:"reservations"`
 	OrderOnline         []LinkSource           `json:"order_online"`
 	Menu                LinkSource             `json:"menu"`
+	MenuItems           []MenuItem             `json:"menu_items"`
 	Owner               Owner                  `json:"owner"`
 	CompleteAddress     Address                `json:"complete_address"`
 	About               []About                `json:"about"`
@@ -183,9 +211,11 @@ func (e *Entry) CsvHeaders() []string {
 		"data_id",
 		"place_id",
 		"images",
+		"media",
 		"reservations",
 		"order_online",
 		"menu",
+		"menu_items",
 		"owner",
 		"complete_address",
 		"about",
@@ -222,9 +252,11 @@ func (e *Entry) CsvRow() []string {
 		e.DataID,
 		e.PlaceID,
 		stringify(e.Images),
+		stringify(e.Media),
 		stringify(e.Reservations),
 		stringify(e.OrderOnline),
 		stringify(e.Menu),
+		stringify(e.MenuItems),
 		stringify(e.Owner),
 		stringify(e.CompleteAddress),
 		stringify(e.About),
@@ -289,6 +321,13 @@ func EntryFromJSON(raw []byte, reviewCountOnly ...bool) (entry Entry, err error)
 
 	if len(reviewCountOnly) == 1 && reviewCountOnly[0] {
 		onlyReviewCount = true
+	}
+
+	raw = bytes.TrimSpace(raw)
+	if len(raw) > 0 && raw[0] != '[' {
+		if idx := bytes.IndexByte(raw, '['); idx >= 0 {
+			raw = raw[idx:]
+		}
 	}
 
 	var jd []any
@@ -360,6 +399,7 @@ func EntryFromJSON(raw []byte, reviewCountOnly ...bool) (entry Entry, err error)
 			Image: items[i].Link,
 		}
 	}
+	entry.Media = getMediaItems(darray)
 
 	entry.Reservations = getLinkSource(getLinkSourceParams{
 		arr:    getNthElementAndCast[[]any](darray, 46),
@@ -383,6 +423,7 @@ func EntryFromJSON(raw []byte, reviewCountOnly ...bool) (entry Entry, err error)
 		Link:   getNthElementAndCast[string](darray, 38, 0),
 		Source: getNthElementAndCast[string](darray, 38, 1),
 	}
+	entry.MenuItems = getMenuItems(darray)
 
 	entry.Owner = Owner{
 		ID:   getNthElementAndCast[string](darray, 57, 2),
@@ -566,6 +607,241 @@ func getLinkSource(params getLinkSourceParams) []LinkSource {
 	}
 
 	return result
+}
+
+func getMediaItems(darray []any) []MediaItem {
+	rawItems := getNthElementAndCast[[]any](darray, 51, 0)
+	if len(rawItems) == 0 {
+		rawItems = getNthElementAndCast[[]any](darray, 37, 0)
+	}
+	if len(rawItems) == 0 {
+		rawItems = getNthElementAndCast[[]any](darray, 72, 0)
+	}
+	if len(rawItems) == 0 {
+		return nil
+	}
+
+	items := make([]MediaItem, 0, len(rawItems))
+
+	for i := range rawItems {
+		rawItem := getNthElementAndCast[[]any](rawItems, i)
+		if len(rawItem) == 0 {
+			continue
+		}
+
+		item := MediaItem{
+			ID:        getNthElementAndCast[string](rawItem, 0),
+			Type:      getNthElementAndCast[string](rawItem, 20),
+			Title:     getNthElementAndCast[string](rawItem, 3),
+			Caption:   getNthElementAndCast[string](rawItem, 6, 1),
+			Thumbnail: getNthElementAndCast[string](rawItem, 6, 0),
+		}
+		item.URL = item.Thumbnail
+
+		videoSourcesI := getNthElementAndCast[[]any](rawItem, 26, 1)
+		if len(videoSourcesI) == 0 {
+			videoSourcesI = getNthElementAndCast[[]any](rawItem, 30, 1)
+		}
+		item.VideoSources = getVideoSources(videoSourcesI)
+		if len(item.VideoSources) > 0 {
+			item.URL = pickBestVideoURL(item.VideoSources)
+		}
+
+		if item.ID == "" && item.URL == "" {
+			continue
+		}
+
+		items = append(items, item)
+	}
+
+	if len(items) == 0 {
+		return nil
+	}
+
+	return items
+}
+
+func getMenuItems(darray []any) []MenuItem {
+	items := make([]MenuItem, 0)
+
+	sections := getNthElementAndCast[[]any](darray, 100, 13, 0, 1, 0)
+	for _, sec := range sections {
+		secArr, ok := sec.([]any)
+		if !ok {
+			continue
+		}
+
+		secItems := parseMenuSection(secArr)
+		if len(secItems) > 0 {
+			items = append(items, secItems...)
+		}
+	}
+
+	// Fallback: walk recursively to find menu section containers in alternate layouts.
+	if len(items) == 0 {
+		var walk func(any)
+		walk = func(node any) {
+			arr, ok := node.([]any)
+			if !ok {
+				return
+			}
+
+			if secItems := parseMenuSection(arr); len(secItems) > 0 {
+				items = append(items, secItems...)
+			}
+
+			for _, child := range arr {
+				walk(child)
+			}
+		}
+		walk(darray)
+	}
+
+	if len(items) == 0 {
+		return nil
+	}
+
+	// De-duplicate menu items that may appear across multiple sections/layout variants.
+	seen := make(map[string]struct{}, len(items))
+	result := make([]MenuItem, 0, len(items))
+	for _, item := range items {
+		key := item.Section + "|" + item.Name + "|" + item.Price
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, item)
+	}
+
+	if len(result) == 0 {
+		return nil
+	}
+
+	return result
+}
+
+func parseMenuSection(secArr []any) []MenuItem {
+	section := strings.TrimSpace(getNthElementAndCast[string](secArr, 0, 0))
+	rows := getNthElementAndCast[[]any](secArr, 1, 0)
+	if len(rows) == 0 {
+		rows = getNthElementAndCast[[]any](secArr, 1)
+	}
+	if section == "" || len(rows) == 0 {
+		return nil
+	}
+	if strings.Contains(section, "/") || strings.Contains(section, "_") {
+		return nil
+	}
+
+	items := make([]MenuItem, 0, len(rows))
+	hasPrice := false
+	for _, row := range rows {
+		rowArr, ok := row.([]any)
+		if !ok {
+			continue
+		}
+
+		name := getNthElementAndCast[string](rowArr, 0, 0)
+		desc := getNthElementAndCast[string](rowArr, 0, 1)
+		price := getNthElementAndCast[string](rowArr, 1, 0)
+		if name == "" {
+			continue
+		}
+		if !isLikelyPrice(price) {
+			continue
+		}
+		hasPrice = true
+
+		items = append(items, MenuItem{
+			Section:     section,
+			Name:        name,
+			Description: desc,
+			Price:       price,
+		})
+	}
+
+	if len(items) == 0 || !hasPrice {
+		return nil
+	}
+
+	return items
+}
+
+func isLikelyPrice(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return false
+	}
+
+	hasDigit := false
+	for _, r := range s {
+		if r >= '0' && r <= '9' {
+			hasDigit = true
+			break
+		}
+	}
+	if !hasDigit {
+		return false
+	}
+
+	indicators := []string{"RM", "MYR", "$", "€", "£", "¥"}
+	for _, indicator := range indicators {
+		if strings.Contains(s, indicator) {
+			return true
+		}
+	}
+
+	return strings.Contains(s, ".") || strings.Contains(s, ",")
+}
+
+func getVideoSources(items []any) []VideoSource {
+	if len(items) == 0 {
+		return nil
+	}
+
+	videoSources := make([]VideoSource, 0, len(items))
+
+	for i := range items {
+		item := getNthElementAndCast[[]any](items, i)
+
+		source := VideoSource{
+			Quality:    int(getNthElementAndCast[float64](item, 0)),
+			Height:     int(getNthElementAndCast[float64](item, 1)),
+			Width:      int(getNthElementAndCast[float64](item, 2)),
+			URL:        getNthElementAndCast[string](item, 3),
+			StreamType: int(getNthElementAndCast[float64](item, 4)),
+		}
+		if source.URL == "" {
+			continue
+		}
+
+		videoSources = append(videoSources, source)
+	}
+
+	if len(videoSources) == 0 {
+		return nil
+	}
+
+	return videoSources
+}
+
+func pickBestVideoURL(videoSources []VideoSource) string {
+	if len(videoSources) == 0 {
+		return ""
+	}
+
+	bestURL := videoSources[0].URL
+	bestSize := videoSources[0].Width * videoSources[0].Height
+
+	for i := 1; i < len(videoSources); i++ {
+		size := videoSources[i].Width * videoSources[i].Height
+		if size > bestSize {
+			bestSize = size
+			bestURL = videoSources[i].URL
+		}
+	}
+
+	return bestURL
 }
 
 //nolint:gomnd // it's ok, I need the indexes

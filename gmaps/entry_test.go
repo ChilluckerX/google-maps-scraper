@@ -1,6 +1,7 @@
 package gmaps_test
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"testing"
@@ -172,6 +173,7 @@ func Test_EntryFromJSON(t *testing.T) {
 
 	entry.PopularTimes = nil
 	entry.UserReviews = nil
+	entry.Media = nil
 
 	require.Equal(t, expected, entry)
 }
@@ -216,4 +218,94 @@ func Test_EntryFromJsonC(t *testing.T) {
 	for _, entry := range entries {
 		fmt.Printf("%+v\n", entry)
 	}
+}
+
+func Test_EntryFromJSON_ExtractMediaWithVideoSources(t *testing.T) {
+	darray := make([]any, 52)
+	darray[4] = []any{nil, nil, nil, nil, nil, nil, nil, 4.7, 10.0}
+	darray[11] = "Test Place"
+	darray[13] = []any{"Restaurant"}
+	darray[18] = "Test Place, 123 Test St"
+
+	mediaItem := []any{
+		"video-token",
+		nil,
+		nil,
+		"Sample Video",
+		nil,
+		nil,
+		[]any{"https://example.com/thumb.jpg", "Sample Place"},
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		"Video",
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		[]any{
+			6544.0,
+			[]any{
+				[]any{18.0, 360.0, 640.0, "https://example.com/video-360.mp4", 1.0},
+				[]any{37.0, 1080.0, 1920.0, "https://example.com/video-1080.mp4", 1.0},
+			},
+		},
+	}
+
+	darray[51] = []any{[]any{mediaItem}}
+
+	raw, err := json.Marshal([]any{nil, nil, nil, nil, nil, nil, darray})
+	require.NoError(t, err)
+
+	entry, err := gmaps.EntryFromJSON(raw)
+	require.NoError(t, err)
+	require.Len(t, entry.Media, 1)
+
+	media := entry.Media[0]
+	require.Equal(t, "video-token", media.ID)
+	require.Equal(t, "Video", media.Type)
+	require.Equal(t, "Sample Video", media.Title)
+	require.Equal(t, "Sample Place", media.Caption)
+	require.Equal(t, "https://example.com/thumb.jpg", media.Thumbnail)
+	require.Equal(t, "https://example.com/video-1080.mp4", media.URL)
+	require.Len(t, media.VideoSources, 2)
+	require.Equal(t, "https://example.com/video-360.mp4", media.VideoSources[0].URL)
+	require.Equal(t, "https://example.com/video-1080.mp4", media.VideoSources[1].URL)
+}
+
+func Test_EntryFromJSONRaw2_HasMedia(t *testing.T) {
+	raw, err := os.ReadFile("../testdata/raw2.json")
+	require.NoError(t, err)
+	require.NotEmpty(t, raw)
+
+	entry, err := gmaps.EntryFromJSON(raw)
+	require.NoError(t, err)
+	require.Greater(t, len(entry.Media), 0)
+}
+
+func Test_EntryFromJSON_WithSecurityPrefix(t *testing.T) {
+	raw, err := os.ReadFile("../testdata/raw.json")
+	require.NoError(t, err)
+	require.NotEmpty(t, raw)
+
+	raw = append([]byte(")]}'\n"), raw...)
+
+	entry, err := gmaps.EntryFromJSON(raw)
+	require.NoError(t, err)
+	require.Equal(t, "Kipriakon", entry.Title)
 }
