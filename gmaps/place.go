@@ -91,7 +91,7 @@ func (j *PlaceJob) Process(_ context.Context, resp *scrapemate.Response) (any, [
 	domReviews, ok := resp.Meta["dom_reviews"].([]DOMReview)
 	if ok && len(domReviews) > 0 {
 		convertedReviews := ConvertDOMReviewsToReviews(domReviews)
-		entry.UserReviewsExtended = append(entry.UserReviewsExtended, convertedReviews...)
+		entry.AddReviewsToExtendedWithLimit(convertedReviews)
 	}
 
 	if j.ExtractEmail && entry.IsWebsiteValidForEmail() {
@@ -151,12 +151,13 @@ func (j *PlaceJob) BrowserActions(ctx context.Context, page scrapemate.BrowserPa
 	resp.Meta["json"] = raw
 
 	if j.ExtractExtraReviews {
-		reviewCount := j.getReviewCount(raw)
-		if reviewCount > 8 { // we have more reviews
+		tmpEntry, err := EntryFromJSON(raw)
+		if err == nil && tmpEntry.ReviewCount > 8 { // we have more reviews
 			params := fetchReviewsParams{
-				page:        page,
-				mapURL:      page.URL(),
-				reviewCount: reviewCount,
+				page:             page,
+				mapURL:           page.URL(),
+				reviewCount:      tmpEntry.ReviewCount,
+				reviewsPerRating: tmpEntry.ReviewsPerRating,
 			}
 
 			// Use the new fallback mechanism that tries RPC first, then DOM

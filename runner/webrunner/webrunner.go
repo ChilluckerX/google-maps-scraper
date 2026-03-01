@@ -144,9 +144,22 @@ func (w *webrunner) scrapeJob(ctx context.Context, job *web.Job) error {
 		return w.svc.Update(ctx, job)
 	}
 
-	outpath := filepath.Join(w.cfg.DataFolder, job.ID+".csv")
+	var isRescrape bool
+	var oldPath string
 
-	outfile, err := os.Create(outpath)
+	if job.Data.MergeWithJobId != "" {
+		isRescrape = true
+		oldPath = filepath.Join(w.cfg.DataFolder, job.Data.MergeWithJobId+".csv")
+	}
+
+	outpath := filepath.Join(w.cfg.DataFolder, job.ID+".csv")
+	var scrapeOutPath string = outpath
+
+	if isRescrape {
+		scrapeOutPath = filepath.Join(w.cfg.DataFolder, job.ID+"_temp.csv")
+	}
+
+	outfile, err := os.Create(scrapeOutPath)
 	if err != nil {
 		return err
 	}
@@ -243,6 +256,15 @@ func (w *webrunner) scrapeJob(ctx context.Context, job *web.Job) error {
 	}
 
 	mate.Close()
+	outfile.Close()
+
+	if isRescrape {
+		if err := w.mergeCSV(oldPath, scrapeOutPath, outpath); err != nil {
+			log.Printf("Failed to merge CSV: %v", err)
+		} else {
+			os.Remove(scrapeOutPath)
+		}
+	}
 
 	job.Status = web.StatusOK
 
@@ -299,4 +321,79 @@ func (w *webrunner) setupMate(_ context.Context, writer io.Writer, job *web.Job)
 	}
 
 	return scrapemateapp.NewScrapeMateApp(matecfg)
+}
+
+func (w *webrunner) mergeCSV(oldPath, newPath, outPath string) error {
+	// Read old CSV
+	oldFile, err := os.Open(oldPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// If old file doesn't exist, just copy the new one over
+			return os.Rename(newPath, outPath)
+		}
+		return err
+	}
+	oldReader := csv.NewReader(oldFile)
+	oldRecords, err := oldReader.ReadAll()
+	oldFile.Close()
+	if err != nil {
+		return err
+	}
+
+	// Read new CSV
+	newFile, err := os.Open(newPath)
+	if err != nil {
+		return err
+	}
+	newReader := csv.NewReader(newFile)
+	newRecords, err := newReader.ReadAll()
+	newFile.Close()
+	if err != nil {
+		return err
+	}
+
+	if len(oldRecords) == 0 {
+		oldRecords = newRecords
+	} else if len(newRecords) > 1 {
+		// Use "link" as key to merge
+		linkIdx := -1
+		for i, h := range oldRecords[0] {
+			if h == "link" {
+				linkIdx = i
+				break
+			}
+		}
+
+		if linkIdx == -1 {
+			linkIdx = 1 // Default to column 1 if header check fails
+		}
+
+		merged := make(map[string][]string)
+		for i := 1; i < len(oldRecords); i++ {
+			if len(oldRecords[i]) > linkIdx {
+				merged[oldRecords[i][linkIdx]] = oldRecords[i]
+			}
+		}
+
+		for i := 1; i < len(newRecords); i++ {
+			if len(newRecords[i]) > linkIdx {
+				merged[newRecords[i][linkIdx]] = newRecords[i]
+			}
+		}
+
+		finalRecords := [][]string{oldRecords[0]}
+		for _, rec := range merged {
+			finalRecords = append(finalRecords, rec)
+		}
+		oldRecords = finalRecords
+	}
+
+	outFile, err := os.Create(outPath)
+	if err != nil {
+		return err
+	}
+	defer outFile.Close()
+
+	writer := csv.NewWriter(outFile)
+	return writer.WriteAll(oldRecords)
 }

@@ -266,6 +266,31 @@ func (e *Entry) CsvRow() []string {
 	}
 }
 
+func (e *Entry) AddReviewsToExtendedWithLimit(reviews []Review) {
+	counts := make(map[int]int)
+	for _, r := range e.UserReviews {
+		counts[r.Rating]++
+	}
+	for _, r := range e.UserReviewsExtended {
+		counts[r.Rating]++
+	}
+
+	for _, r := range reviews {
+		if r.Rating >= 1 && r.Rating <= 5 {
+			if counts[r.Rating] < 5 {
+				e.UserReviewsExtended = append(e.UserReviewsExtended, r)
+				counts[r.Rating]++
+			}
+		} else {
+			// For ratings outside 1-5 (if any), keep up to 5
+			if counts[r.Rating] < 5 {
+				e.UserReviewsExtended = append(e.UserReviewsExtended, r)
+				counts[r.Rating]++
+			}
+		}
+	}
+}
+
 func (e *Entry) AddExtraReviews(pages [][]byte) {
 	if len(pages) == 0 {
 		return
@@ -274,7 +299,7 @@ func (e *Entry) AddExtraReviews(pages [][]byte) {
 	for _, page := range pages {
 		reviews := extractReviews(page)
 		if len(reviews) > 0 {
-			e.UserReviewsExtended = append(e.UserReviewsExtended, reviews...)
+			e.AddReviewsToExtendedWithLimit(reviews)
 		}
 	}
 }

@@ -19,9 +19,10 @@ import (
 )
 
 type fetchReviewsParams struct {
-	page        scrapemate.BrowserPage
-	mapURL      string
-	reviewCount int
+	page             scrapemate.BrowserPage
+	mapURL           string
+	reviewCount      int
+	reviewsPerRating map[int]int
 }
 
 type FetchReviewsResponse struct {
@@ -74,9 +75,33 @@ func (f *fetcher) fetch(ctx context.Context) (FetchReviewsResponse, error) {
 	ans := FetchReviewsResponse{}
 	ans.pages = append(ans.pages, currentPageBody)
 
+	counts := make(map[int]int)
+	initialReviews := extractReviews(currentPageBody)
+	for _, r := range initialReviews {
+		counts[r.Rating]++
+	}
+
 	nextPageToken := extractNextPageToken(currentPageBody)
 
-	for nextPageToken != "" {
+	maxPages := 10
+	pagesFetched := 1
+
+	for nextPageToken != "" && pagesFetched < maxPages {
+		hasEnough := true
+		for i := 1; i <= 5; i++ {
+			target := 5
+			if f.params.reviewsPerRating != nil && f.params.reviewsPerRating[i] >= 0 && f.params.reviewsPerRating[i] < 5 {
+				target = f.params.reviewsPerRating[i]
+			}
+			if counts[i] < target {
+				hasEnough = false
+				break
+			}
+		}
+		if hasEnough {
+			break
+		}
+
 		reviewURL, err = f.generateURL(f.params.mapURL, nextPageToken, 20, requestIDForSession)
 		if err != nil {
 			log.Printf("Error generating URL for token %s: %v", nextPageToken, err)
@@ -90,7 +115,13 @@ func (f *fetcher) fetch(ctx context.Context) (FetchReviewsResponse, error) {
 		}
 
 		ans.pages = append(ans.pages, currentPageBody)
+		pageReviews := extractReviews(currentPageBody)
+		for _, r := range pageReviews {
+			counts[r.Rating]++
+		}
+
 		nextPageToken = extractNextPageToken(currentPageBody)
+		pagesFetched++
 	}
 
 	return ans, nil
@@ -143,9 +174,33 @@ func (f *fetcher) fetchWithBrowser(_ context.Context, initialURL, requestID stri
 
 	ans.pages = append(ans.pages, []byte(data))
 
+	counts := make(map[int]int)
+	initialReviews := extractReviews([]byte(data))
+	for _, r := range initialReviews {
+		counts[r.Rating]++
+	}
+
 	// Get additional pages
 	nextPageToken := extractNextPageToken([]byte(data))
-	for nextPageToken != "" && len(ans.pages) < 50 { // Limit to 50 pages
+
+	maxPages := 10
+	pagesFetched := 1
+
+	for nextPageToken != "" && pagesFetched < maxPages { // Limit to 10 pages
+		hasEnough := true
+		for i := 1; i <= 5; i++ {
+			target := 5
+			if f.params.reviewsPerRating != nil && f.params.reviewsPerRating[i] >= 0 && f.params.reviewsPerRating[i] < 5 {
+				target = f.params.reviewsPerRating[i]
+			}
+			if counts[i] < target {
+				hasEnough = false
+				break
+			}
+		}
+		if hasEnough {
+			break
+		}
 		nextURL, err := f.generateURL(f.params.mapURL, nextPageToken, 20, requestID)
 		if err != nil {
 			break
@@ -182,7 +237,13 @@ func (f *fetcher) fetchWithBrowser(_ context.Context, initialURL, requestID stri
 		}
 
 		ans.pages = append(ans.pages, []byte(data))
+		pageReviews := extractReviews([]byte(data))
+		for _, r := range pageReviews {
+			counts[r.Rating]++
+		}
+
 		nextPageToken = extractNextPageToken([]byte(data))
+		pagesFetched++
 	}
 
 	return ans, nil
@@ -415,7 +476,7 @@ func extractReviewsFromPage(ctx context.Context, page scrapemate.BrowserPage) ([
 
 	var reviews []DOMReview
 
-	maxScrollAttempts := 30
+	maxScrollAttempts := 10 // Reduced from 30 to limit time spent
 	lastCount := 0
 	stuckCount := 0
 

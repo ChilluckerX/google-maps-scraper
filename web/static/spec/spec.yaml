@@ -198,6 +198,8 @@ components:
           type: array
           items:
             type: string
+        merge_with_job_id:
+          type: string
 
     ApiScrapeResponse:
       type: object
@@ -249,4 +251,6 @@ components:
           type: array
           items:
             type: string
+        merge_with_job_id:
+          type: string
 

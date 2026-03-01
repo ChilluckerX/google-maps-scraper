@@ -62,6 +62,11 @@ func New(svc *Service, addr string) (*Server, error) {
 
 		ans.delete(w, r)
 	})
+	mux.HandleFunc("/rescrap", func(w http.ResponseWriter, r *http.Request) {
+		r = requestWithID(r)
+
+		ans.rescrapUI(w, r)
+	})
 	mux.HandleFunc("/jobs", ans.getJobs)
 	mux.HandleFunc("/", ans.index)
 
@@ -92,6 +97,10 @@ func New(svc *Service, addr string) (*Server, error) {
 		case http.MethodDelete:
 			ans.apiDeleteJob(w, r)
 		default:
+			if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/rescrap") {
+				ans.apiRescrapeJob(w, r)
+				return
+			}
 			ans := apiError{
 				Code:    http.StatusMethodNotAllowed,
 				Message: "Method not allowed",
@@ -99,6 +108,16 @@ func New(svc *Service, addr string) (*Server, error) {
 
 			renderJSON(w, http.StatusMethodNotAllowed, ans)
 		}
+	})
+
+	mux.HandleFunc("/api/v1/jobs/{id}/rescrap", func(w http.ResponseWriter, r *http.Request) {
+		r = requestWithID(r)
+		if r.Method != http.MethodPost {
+			ans := apiError{Code: http.StatusMethodNotAllowed, Message: "Method not allowed"}
+			renderJSON(w, http.StatusMethodNotAllowed, ans)
+			return
+		}
+		ans.apiRescrapeJob(w, r)
 	})
 
 	mux.HandleFunc("/api/v1/jobs/{id}/download", func(w http.ResponseWriter, r *http.Request) {
@@ -455,6 +474,48 @@ func (s *Server) delete(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
+func (s *Server) rescrapUI(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	rescrapID, ok := getIDFromRequest(r)
+	if !ok {
+		http.Error(w, "Invalid ID", http.StatusUnprocessableEntity)
+		return
+	}
+
+	oldJob, err := s.svc.Get(r.Context(), rescrapID.String())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+
+	newJob := Job{
+		ID:     uuid.New().String(),
+		Name:   oldJob.Name + " (Rescraped)",
+		Date:   time.Now().UTC(),
+		Status: StatusPending,
+		Data:   oldJob.Data,
+	}
+	newJob.Data.MergeWithJobId = oldJob.ID
+
+	err = s.svc.Create(r.Context(), &newJob)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	tmpl, ok := s.tmpl["static/templates/job_row.html"]
+	if !ok {
+		http.Error(w, "missing tpl", http.StatusInternalServerError)
+		return
+	}
+
+	_ = tmpl.Execute(w, newJob)
+}
+
 type apiError struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
@@ -607,6 +668,41 @@ func (s *Server) apiDeleteJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusOK)
+}
+
+func (s *Server) apiRescrapeJob(w http.ResponseWriter, r *http.Request) {
+	id, ok := getIDFromRequest(r)
+	if !ok {
+		apiError := apiError{Code: http.StatusUnprocessableEntity, Message: "Invalid ID"}
+		renderJSON(w, http.StatusUnprocessableEntity, apiError)
+		return
+	}
+
+	oldJob, err := s.svc.Get(r.Context(), id.String())
+	if err != nil {
+		apiError := apiError{Code: http.StatusNotFound, Message: "Job not found"}
+		renderJSON(w, http.StatusNotFound, apiError)
+		return
+	}
+
+	newJob := Job{
+		ID:     uuid.New().String(),
+		Name:   oldJob.Name + " (Rescraped)",
+		Date:   time.Now().UTC(),
+		Status: StatusPending,
+		Data:   oldJob.Data,
+	}
+	newJob.Data.MergeWithJobId = oldJob.ID
+
+	err = s.svc.Create(r.Context(), &newJob)
+	if err != nil {
+		apiError := apiError{Code: http.StatusInternalServerError, Message: err.Error()}
+		renderJSON(w, http.StatusInternalServerError, apiError)
+		return
+	}
+
+	ans := apiScrapeResponse{ID: newJob.ID}
+	renderJSON(w, http.StatusCreated, ans)
 }
 
 func renderJSON(w http.ResponseWriter, code int, data any) {
